@@ -19,6 +19,10 @@ public:
     void stop();   // Stop recording audio
     void setDevice(const QAudioDeviceInfo &deviceInfo);  // Set the audio input device
     QByteArray getAudioBuffer() const;  // Retrieve the audio buffer
+    void setSampleRate(int frequency);
+    int getSampleRate() const;  // Declare the getSampleRate function here
+
+    int sampleRate;
 
 signals:
     void dataReady(const QByteArray &data);  // Signal emitted when new audio data is ready

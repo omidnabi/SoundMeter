@@ -4,7 +4,7 @@
 #include <QDebug>
 
 AudioInput::AudioInput(QObject *parent)
-    : QObject(parent), audioInput(nullptr), audioDevice(nullptr)
+    : QObject(parent), audioInput(nullptr), audioDevice(nullptr), sampleRate(10000)  // Initialize sampleRate
 {
     // Initialize with the default device
     QAudioDeviceInfo defaultDevice = QAudioDeviceInfo::defaultInputDevice();
@@ -53,7 +53,7 @@ void AudioInput::setDevice(const QAudioDeviceInfo &deviceInfo)
     }
 
     QAudioFormat format;
-    format.setSampleRate(280000);  // Adjust to a higher sample rate for higher frequencies
+    format.setSampleRate(sampleRate);  // Use current sample rate
     format.setChannelCount(1);     // Mono channel
     format.setSampleSize(16);      // 16-bit samples
     format.setCodec("audio/pcm");  // PCM codec
@@ -69,6 +69,15 @@ void AudioInput::setDevice(const QAudioDeviceInfo &deviceInfo)
     qDebug() << "Audio device set to:" << deviceInfo.deviceName();
 }
 
+void AudioInput::setSampleRate(int frequency)
+{
+    sampleRate = frequency;  // Update the sample rate
+}
+
+int AudioInput::getSampleRate() const
+{
+    return sampleRate;  // Return the current sample rate
+}
 
 QByteArray AudioInput::getAudioBuffer() const
 {

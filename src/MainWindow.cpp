@@ -4,12 +4,16 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QTimer>
-#include <QAudioDeviceInfo>
+#include <QThread>
+#include <QMetaType>
 
 MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent), ui(new Ui::MainWindow), workerThread(new QThread(this)), audioWorker(new AudioWorker())
+    : QMainWindow(parent), ui(new Ui::MainWindow), workerThread(new QThread(this)), audioWorker(new AudioWorker()), audioInput(nullptr), frequencyMeter(nullptr)
 {
     ui->setupUi(this);
+
+    // Register QVector<double> type with Qt
+    qRegisterMetaType<QVector<double>>("QVector<double>");
 
     // Use the frequency meter widget from the UI
     frequencyMeter = ui->frequencyMeter;  // Get the existing frequency meter from the UI
@@ -17,25 +21,24 @@ MainWindow::MainWindow(QWidget *parent)
     // Populate the device list
     populateDeviceList();
 
-    audioInput = new AudioInput(this);
+    // Initialize audio input with the default device
+    initializeAudioInput(QAudioDeviceInfo::defaultInputDevice());
 
     // Set up audio worker and move it to a separate thread
     audioWorker->moveToThread(workerThread);
+    connect(workerThread, &QThread::finished, audioWorker, &QObject::deleteLater);
+    connect(this, &MainWindow::processAudioData, audioWorker, &AudioWorker::processAudioData);
+    connect(audioWorker, &AudioWorker::frequencyAnalysisReady, this, &MainWindow::updateDisplay);
 
-    // Connect signals and slots for audio input and processing
-    connect(ui->frequencyDial, &QDial::valueChanged, this, &MainWindow::onFrequencyDialChanged);
-    connect(audioInput, &AudioInput::dataReady, this, &MainWindow::handleAudioData);
+    // Ensure the worker thread starts
+    workerThread->start();
+
+    // Connect UI signals
     connect(ui->startButton, &QPushButton::clicked, this, &MainWindow::onStartRecording);
     connect(ui->stopButton, &QPushButton::clicked, this, &MainWindow::onStopRecording);
     connect(ui->saveButton, &QPushButton::clicked, this, &MainWindow::onSaveRecording);
     connect(ui->deviceComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onDeviceChanged);
-
-    // Connect worker signals and slots for threaded processing
-    connect(this, &MainWindow::processAudioData, audioWorker, &AudioWorker::processAudioData);
-    connect(audioWorker, &AudioWorker::frequencyAnalysisReady, this, &MainWindow::updateDisplay);
-
-    // Start the worker thread
-    workerThread->start();
+    connect(ui->frequencyDial, &QDial::valueChanged, this, &MainWindow::onFrequencyDialChanged);
 
     // Set up the recording indicator (initially hidden)
     ui->recordingIndicator->setVisible(false);
@@ -45,10 +48,10 @@ MainWindow::~MainWindow()
 {
     workerThread->quit();
     workerThread->wait();
-    delete ui;
+    delete audioWorker;
+    delete workerThread;
     delete audioInput;
-    delete frequencyMeter;
-    delete audioWorker;  // Ensure worker is deleted after thread finishes
+    delete ui;
 }
 
 void MainWindow::populateDeviceList()
@@ -62,22 +65,33 @@ void MainWindow::populateDeviceList()
     // Set the combo box to the default input device
     QAudioDeviceInfo defaultDevice = QAudioDeviceInfo::defaultInputDevice();
     int defaultIndex = audioDevices.indexOf(defaultDevice);
-    ui->deviceComboBox->setCurrentIndex(defaultIndex);
+
+    if (defaultIndex != -1) {
+        ui->deviceComboBox->setCurrentIndex(defaultIndex);
+        onDeviceChanged(defaultIndex);  // Initialize with the default device
+    } else if (!audioDevices.isEmpty()) {
+        ui->deviceComboBox->setCurrentIndex(0);  // Fallback to the first device if no default is found
+        onDeviceChanged(0);  // Initialize with the first device
+    }
+}
+
+void MainWindow::initializeAudioInput(const QAudioDeviceInfo &deviceInfo)
+{
+    if (audioInput) {
+        audioInput->stop();
+        delete audioInput;
+    }
+
+    audioInput = new AudioInput(this);
+    audioInput->setDevice(deviceInfo);
+    connect(audioInput, &AudioInput::dataReady, this, &MainWindow::handleAudioData);
 }
 
 void MainWindow::onDeviceChanged(int index)
 {
-    // Change the audio input device based on the selected index
     if (index >= 0 && index < audioDevices.size()) {
         QAudioDeviceInfo selectedDevice = audioDevices.at(index);
-        audioInput->stop();
-        delete audioInput;
-
-        // Re-create AudioInput with the selected device
-        audioInput = new AudioInput(this);
-        audioInput->setDevice(selectedDevice);
-        connect(audioInput, &AudioInput::dataReady, this, &MainWindow::handleAudioData);
-        audioInput->start();
+        initializeAudioInput(selectedDevice);
     }
 }
 
@@ -112,7 +126,7 @@ void MainWindow::onSaveRecording()
     // Prepare the WAV header
     QByteArray header;
     int dataSize = audioData.size();
-    int sampleRate = 44100;  // Sample rate
+    int sampleRate = audioInput->getSampleRate();  // Use the actual sample rate from AudioInput
     int numChannels = 1;     // Mono audio
     int bitsPerSample = 16;  // 16-bit samples
     int byteRate = sampleRate * numChannels * (bitsPerSample / 8);
@@ -122,7 +136,6 @@ void MainWindow::onSaveRecording()
 
     int chunkSize = 4 + (8 + subchunk1Size) + (8 + dataSize);
 
-    // Correctly calculate the sizes
     header.append("RIFF");
     header.append(reinterpret_cast<const char*>(&chunkSize), 4);
     header.append("WAVE");
@@ -189,7 +202,8 @@ void MainWindow::updateDisplay(const QVector<double> &frequencies)
     int maxIndex = std::distance(frequencies.begin(), maxIt);
     double maxFrequency = *maxIt;
 
-    double dominantFrequencyHz = maxIndex * 44100.0 / frequencies.size();
+    int sampleRate = audioInput->getSampleRate();  // Ensure this is correct
+    double dominantFrequencyHz = maxIndex * static_cast<double>(sampleRate) / frequencies.size();
 
     // Update frequency label
     ui->frequencyLabel->setText(QString("Dominant Frequency: %1 Hz").arg(dominantFrequencyHz));
@@ -203,8 +217,11 @@ void MainWindow::onFrequencyDialChanged(int value)
     // Update the frequency label
     ui->frequencyDialLabel->setText(QString("Input Frequency: %1 Hz").arg(value));
 
-    // If you want to adjust some internal settings or perform an action based on the new frequency, do it here.
-    // For example, you might want to filter the input or adjust the FFT calculation range.
+    // Adjust the sampling rate or perform an action based on the new frequency
+    if (audioInput) {
+        audioInput->setSampleRate(value); // Adjust based on your actual method
+    }
 }
+
 // Include the generated moc file for MainWindow
 #include "moc_MainWindow.cpp"
